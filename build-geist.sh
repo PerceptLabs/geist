@@ -2,7 +2,8 @@
 # build-geist.sh — Build geist.com from NullClaw + Cosmopolitan
 #
 # Usage:
-#   ./build-geist.sh              # Full build
+#   ./build-geist.sh              # Full build (requires zig + cosmocc)
+#   ./build-geist.sh --prebuilt   # Use pre-built NullClaw binaries (skip zig)
 #   ./build-geist.sh --clean      # Clean build (remove nullclaw clone and dist)
 #   ./build-geist.sh --skip-clone # Skip git clone/pull (for CI with pre-fetched source)
 set -euo pipefail
@@ -11,12 +12,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # --- Configuration ---
 NULLCLAW_REPO="https://github.com/nullclaw/nullclaw.git"
+NULLCLAW_RELEASE="https://github.com/nullclaw/nullclaw/releases/latest/download"
 NULLCLAW_DIR="${SCRIPT_DIR}/nullclaw"
 ZIG_REQUIRED="0.15.2"
 ZIG_BIN="${ZIG_BIN:-zig}"
 COSMOCC_DIR="${COSMOCC_DIR:-}"
 DIST_DIR="${SCRIPT_DIR}/dist"
 PATCHES_DIR="${SCRIPT_DIR}/patches"
+MKAPE="${SCRIPT_DIR}/mkape.py"
 
 # --- Colors (respects NO_COLOR) ---
 if [ -z "${NO_COLOR:-}" ] && [ -t 1 ]; then
@@ -38,14 +41,17 @@ die()   { error "$*"; exit 1; }
 # --- Parse flags ---
 CLEAN=false
 SKIP_CLONE=false
+PREBUILT=false
 for arg in "$@"; do
     case "$arg" in
         --clean)      CLEAN=true ;;
         --skip-clone) SKIP_CLONE=true ;;
+        --prebuilt)   PREBUILT=true ;;
         --help|-h)
-            echo "Usage: $0 [--clean] [--skip-clone]"
+            echo "Usage: $0 [--clean] [--skip-clone] [--prebuilt]"
             echo "  --clean       Remove nullclaw/ and dist/ before building"
             echo "  --skip-clone  Skip git clone/pull (use existing nullclaw/)"
+            echo "  --prebuilt    Download pre-built NullClaw binaries (skip zig build)"
             exit 0
             ;;
         *) die "Unknown flag: $arg" ;;
@@ -62,27 +68,102 @@ fi
 
 # --- Step 1: Check prerequisites ---
 info "Checking prerequisites..."
+mkdir -p "${DIST_DIR}"
+PATCH_COUNT=0
 
-# Zig
-if ! command -v "$ZIG_BIN" &>/dev/null; then
-    die "Zig not found. Install Zig ${ZIG_REQUIRED} and ensure it's on PATH, or set ZIG_BIN."
+if [ "$PREBUILT" = true ]; then
+    # --prebuilt mode: download pre-built binaries, skip zig entirely
+    info "Using pre-built NullClaw binaries..."
+
+    if ! command -v curl &>/dev/null && ! command -v wget &>/dev/null; then
+        die "Neither curl nor wget found. Install one and try again."
+    fi
+
+    fetch_file() {
+        local url="$1" dest="$2"
+        if command -v curl &>/dev/null; then
+            curl -fsSL -o "$dest" "$url"
+        else
+            wget -q -O "$dest" "$url"
+        fi
+    }
+
+    for arch in x86_64 aarch64; do
+        local_file="${DIST_DIR}/geist-linux-${arch}"
+        if [ -f "$local_file" ]; then
+            info "Using existing ${local_file}"
+        else
+            info "Downloading nullclaw-linux-${arch}..."
+            fetch_file "${NULLCLAW_RELEASE}/nullclaw-linux-${arch}" "$local_file"
+        fi
+        chmod +x "$local_file"
+    done
+    ok "Pre-built binaries ready"
+else
+    # Full build mode: requires zig + source
+    if ! command -v "$ZIG_BIN" &>/dev/null; then
+        die "Zig not found. Install Zig ${ZIG_REQUIRED} and ensure it's on PATH, or set ZIG_BIN."
+    fi
+
+    ZIG_VERSION=$("$ZIG_BIN" version 2>&1)
+    if [ "$ZIG_VERSION" != "$ZIG_REQUIRED" ]; then
+        die "Zig version mismatch: got '${ZIG_VERSION}', need exactly '${ZIG_REQUIRED}'."
+    fi
+    ok "Zig ${ZIG_REQUIRED}"
+
+    # --- Get NullClaw source ---
+    if [ "$SKIP_CLONE" = false ]; then
+        if [ -d "${NULLCLAW_DIR}/.git" ]; then
+            info "Updating NullClaw..."
+            git -C "${NULLCLAW_DIR}" pull --ff-only
+        else
+            info "Cloning NullClaw..."
+            git clone "${NULLCLAW_REPO}" "${NULLCLAW_DIR}"
+        fi
+        ok "NullClaw source at ${NULLCLAW_DIR}"
+    else
+        [ -d "${NULLCLAW_DIR}" ] || die "NullClaw directory not found at ${NULLCLAW_DIR} (--skip-clone requires it to exist)"
+        info "Skipping clone (--skip-clone)"
+    fi
+
+    # --- Apply patches ---
+    if [ -d "${PATCHES_DIR}" ]; then
+        for patch in "${PATCHES_DIR}"/*.patch; do
+            [ -f "$patch" ] || continue
+            info "Applying patch: $(basename "$patch")"
+            git -C "${NULLCLAW_DIR}" apply "$patch"
+            PATCH_COUNT=$((PATCH_COUNT + 1))
+        done
+    fi
+    if [ "$PATCH_COUNT" -gt 0 ]; then
+        ok "Applied ${PATCH_COUNT} patch(es)"
+    else
+        info "No patches to apply"
+    fi
+
+    # --- Build x86_64 ---
+    info "Building x86_64..."
+    cd "${NULLCLAW_DIR}"
+    "$ZIG_BIN" build -Doptimize=ReleaseSmall -Dengines=base,sqlite -Dtarget=x86_64-linux
+    cp zig-out/bin/nullclaw "${DIST_DIR}/geist-linux-x86_64"
+    ok "x86_64 binary: $(du -h "${DIST_DIR}/geist-linux-x86_64" | cut -f1)"
+
+    # --- Build aarch64 ---
+    info "Building aarch64..."
+    "$ZIG_BIN" build -Doptimize=ReleaseSmall -Dengines=base,sqlite -Dtarget=aarch64-linux
+    cp zig-out/bin/nullclaw "${DIST_DIR}/geist-linux-aarch64"
+    ok "aarch64 binary: $(du -h "${DIST_DIR}/geist-linux-aarch64" | cut -f1)"
+    cd "${SCRIPT_DIR}"
 fi
 
-ZIG_VERSION=$("$ZIG_BIN" version 2>&1)
-if [ "$ZIG_VERSION" != "$ZIG_REQUIRED" ]; then
-    die "Zig version mismatch: got '${ZIG_VERSION}', need exactly '${ZIG_REQUIRED}'."
-fi
-ok "Zig ${ZIG_REQUIRED}"
-
-# Cosmocc — find the toolchain
+# --- Link fat APE binary ---
+# Try apelink first, fall back to mkape.py
 find_cosmo_tool() {
     local tool="$1"
-    # Check COSMOCC_DIR first
     if [ -n "$COSMOCC_DIR" ] && [ -x "${COSMOCC_DIR}/bin/${tool}" ]; then
         echo "${COSMOCC_DIR}/bin/${tool}"
         return
     fi
-    # Check PATH
     if command -v "$tool" &>/dev/null; then
         command -v "$tool"
         return
@@ -90,81 +171,42 @@ find_cosmo_tool() {
     return 1
 }
 
-APELINK=$(find_cosmo_tool apelink) || die "apelink not found. Install cosmocc and ensure it's on PATH, or set COSMOCC_DIR."
-APE_X86_64=$(find_cosmo_tool ape-x86_64.elf 2>/dev/null || true)
-APE_AARCH64=$(find_cosmo_tool ape-aarch64.elf 2>/dev/null || true)
+USE_MKAPE=false
+if APELINK=$(find_cosmo_tool apelink 2>/dev/null); then
+    COSMO_BIN_DIR="$(dirname "$APELINK")"
+    APE_X86_64="${COSMO_BIN_DIR}/ape-x86_64.elf"
+    APE_AARCH64="${COSMO_BIN_DIR}/ape-aarch64.elf"
+    APE_M1_C="${COSMO_BIN_DIR}/ape-m1.c"
 
-# Find APE loader files relative to apelink
-COSMO_BIN_DIR="$(dirname "$APELINK")"
-[ -z "$APE_X86_64" ] && APE_X86_64="${COSMO_BIN_DIR}/ape-x86_64.elf"
-[ -z "$APE_AARCH64" ] && APE_AARCH64="${COSMO_BIN_DIR}/ape-aarch64.elf"
-APE_M1_C="${COSMO_BIN_DIR}/ape-m1.c"
-
-[ -f "$APE_X86_64" ]  || die "APE loader not found: ${APE_X86_64}"
-[ -f "$APE_AARCH64" ] || die "APE loader not found: ${APE_AARCH64}"
-[ -f "$APE_M1_C" ]    || die "APE M1 loader not found: ${APE_M1_C}"
-
-ok "apelink at ${APELINK}"
-
-# --- Step 2: Get NullClaw source ---
-if [ "$SKIP_CLONE" = false ]; then
-    if [ -d "${NULLCLAW_DIR}/.git" ]; then
-        info "Updating NullClaw..."
-        git -C "${NULLCLAW_DIR}" pull --ff-only
+    if [ -f "$APE_X86_64" ] && [ -f "$APE_AARCH64" ] && [ -f "$APE_M1_C" ]; then
+        info "Linking fat APE binary with apelink..."
+        "$APELINK" \
+            -l "$APE_X86_64" \
+            -l "$APE_AARCH64" \
+            -M "$APE_M1_C" \
+            -o "${DIST_DIR}/geist.com" \
+            "${DIST_DIR}/geist-linux-x86_64" \
+            "${DIST_DIR}/geist-linux-aarch64"
+        ok "Fat APE (apelink): $(du -h "${DIST_DIR}/geist.com" | cut -f1)"
     else
-        info "Cloning NullClaw..."
-        git clone "${NULLCLAW_REPO}" "${NULLCLAW_DIR}"
+        USE_MKAPE=true
     fi
-    ok "NullClaw source at ${NULLCLAW_DIR}"
 else
-    [ -d "${NULLCLAW_DIR}" ] || die "NullClaw directory not found at ${NULLCLAW_DIR} (--skip-clone requires it to exist)"
-    info "Skipping clone (--skip-clone)"
+    USE_MKAPE=true
 fi
 
-# --- Step 3: Apply patches ---
-PATCH_COUNT=0
-if [ -d "${PATCHES_DIR}" ]; then
-    for patch in "${PATCHES_DIR}"/*.patch; do
-        [ -f "$patch" ] || continue
-        info "Applying patch: $(basename "$patch")"
-        git -C "${NULLCLAW_DIR}" apply "$patch"
-        PATCH_COUNT=$((PATCH_COUNT + 1))
-    done
+if [ "$USE_MKAPE" = true ]; then
+    if [ -f "$MKAPE" ] && command -v python3 &>/dev/null; then
+        info "apelink not available, using mkape.py fallback..."
+        python3 "$MKAPE" \
+            -o "${DIST_DIR}/geist.com" \
+            --x86_64 "${DIST_DIR}/geist-linux-x86_64" \
+            --aarch64 "${DIST_DIR}/geist-linux-aarch64"
+        ok "Fat APE (mkape.py): $(du -h "${DIST_DIR}/geist.com" | cut -f1)"
+    else
+        die "Neither apelink nor mkape.py+python3 available. Install cosmocc or ensure python3 is on PATH."
+    fi
 fi
-if [ "$PATCH_COUNT" -gt 0 ]; then
-    ok "Applied ${PATCH_COUNT} patch(es)"
-else
-    info "No patches to apply"
-fi
-
-# --- Step 4: Build x86_64 ---
-info "Building x86_64..."
-mkdir -p "${DIST_DIR}"
-cd "${NULLCLAW_DIR}"
-"$ZIG_BIN" build -Doptimize=ReleaseSmall -Dengines=base,sqlite -Dtarget=x86_64-linux
-cp zig-out/bin/nullclaw "${DIST_DIR}/geist-linux-x86_64"
-X86_SIZE=$(wc -c < "${DIST_DIR}/geist-linux-x86_64")
-ok "x86_64 binary: $(du -h "${DIST_DIR}/geist-linux-x86_64" | cut -f1)"
-
-# --- Step 5: Build aarch64 ---
-info "Building aarch64..."
-"$ZIG_BIN" build -Doptimize=ReleaseSmall -Dengines=base,sqlite -Dtarget=aarch64-linux
-cp zig-out/bin/nullclaw "${DIST_DIR}/geist-linux-aarch64"
-AARCH64_SIZE=$(wc -c < "${DIST_DIR}/geist-linux-aarch64")
-ok "aarch64 binary: $(du -h "${DIST_DIR}/geist-linux-aarch64" | cut -f1)"
-cd "${SCRIPT_DIR}"
-
-# --- Step 6: apelink ---
-info "Linking fat APE binary..."
-"$APELINK" \
-    -l "$APE_X86_64" \
-    -l "$APE_AARCH64" \
-    -M "$APE_M1_C" \
-    -o "${DIST_DIR}/geist.com" \
-    "${DIST_DIR}/geist-linux-x86_64" \
-    "${DIST_DIR}/geist-linux-aarch64"
-APE_SIZE=$(wc -c < "${DIST_DIR}/geist.com")
-ok "Fat APE: $(du -h "${DIST_DIR}/geist.com" | cut -f1)"
 
 # --- Step 7: Checksums ---
 info "Generating checksums..."

@@ -2,6 +2,7 @@
 dist/*.com
 dist/*.elf
 dist/checksums.txt
+dist/geist-linux-*
 
 # NullClaw clone (fetched by build script)
 nullclaw/
