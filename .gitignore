@@ -1,6 +1,7 @@
 # Build output
 dist/*.com
 dist/*.elf
+dist/*.bin
 dist/checksums.txt
 dist/geist-linux-*
 

@@ -93,8 +93,8 @@ if [ "$PREBUILT" = true ]; then
         if [ -f "$local_file" ]; then
             info "Using existing ${local_file}"
         else
-            info "Downloading nullclaw-linux-${arch}..."
-            fetch_file "${NULLCLAW_RELEASE}/nullclaw-linux-${arch}" "$local_file"
+            info "Downloading nullclaw-linux-${arch}.bin..."
+            fetch_file "${NULLCLAW_RELEASE}/nullclaw-linux-${arch}.bin" "$local_file"
         fi
         chmod +x "$local_file"
     done
@@ -180,14 +180,19 @@ if APELINK=$(find_cosmo_tool apelink 2>/dev/null); then
 
     if [ -f "$APE_X86_64" ] && [ -f "$APE_AARCH64" ] && [ -f "$APE_M1_C" ]; then
         info "Linking fat APE binary with apelink..."
-        "$APELINK" \
+        if "$APELINK" \
             -l "$APE_X86_64" \
             -l "$APE_AARCH64" \
             -M "$APE_M1_C" \
             -o "${DIST_DIR}/geist.com" \
             "${DIST_DIR}/geist-linux-x86_64" \
-            "${DIST_DIR}/geist-linux-aarch64"
-        ok "Fat APE (apelink): $(du -h "${DIST_DIR}/geist.com" | cut -f1)"
+            "${DIST_DIR}/geist-linux-aarch64" 2>/dev/null; then
+            ok "Fat APE (apelink): $(du -h "${DIST_DIR}/geist.com" | cut -f1)"
+        else
+            warn "apelink failed (exit $?), falling back to mkape.py"
+            rm -f "${DIST_DIR}/geist.com"
+            USE_MKAPE=true
+        fi
     else
         USE_MKAPE=true
     fi
