@@ -1,0 +1,26 @@
+# Build output
+dist/*.com
+dist/*.elf
+dist/checksums.txt
+
+# NullClaw clone (fetched by build script)
+nullclaw/
+
+# Zig build cache
+zig-cache/
+zig-out/
+.zig-cache/
+
+# Cosmopolitan toolchain (if downloaded locally)
+cosmocc/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
